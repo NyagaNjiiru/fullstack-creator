@@ -1,0 +1,11 @@
+LICENSE
+README.md
+setup.py
+src/fullstack_creator/__init__.py
+src/fullstack_creator/main.py
+src/fullstack_creator.egg-info/PKG-INFO
+src/fullstack_creator.egg-info/SOURCES.txt
+src/fullstack_creator.egg-info/dependency_links.txt
+src/fullstack_creator.egg-info/entry_points.txt
+src/fullstack_creator.egg-info/requires.txt
+src/fullstack_creator.egg-info/top_level.txt

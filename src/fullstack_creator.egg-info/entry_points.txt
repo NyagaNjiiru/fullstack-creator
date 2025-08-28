@@ -1,0 +1,2 @@
+[console_scripts]
+create-fullstack = fullstack_creator.main:main

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: fullstack-creator
+Version: 1.0.0
+Summary: A tool to create fullstack projects with various frameworks
+Author: Patrick Njiru
+License-File: LICENSE
+Requires-Dist: inquirer
+Dynamic: author
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary
