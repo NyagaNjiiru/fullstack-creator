@@ -41,6 +41,11 @@ def main():
             "backend",
             message="Choose backend framework",
             choices=["Express (Node.js)", "Django", "Flask", "FastAPI", "None"]
+        ),
+        inquirer.List(
+            "visibility",
+            message="GitHub repository visibility",
+            choices=["Public", "Private"]
         )
     ]
     answers = inquirer.prompt(questions)
@@ -293,7 +298,8 @@ build/
     run_cmd("git commit -m 'Initial commit'", cwd=project_path)
     
     print("Creating GitHub repository...")
-    run_cmd(f"gh repo create {project_name} --public --source . --remote=origin --push", cwd=project_path)
+    visibility_flag = "--public" if answers["visibility"] == "Public" else "--private"
+    run_cmd(f"gh repo create {project_name} {visibility_flag} --source . --remote=origin --push", cwd=project_path)
     
     print(f"\n✅ Done! Your project '{project_name}' is ready and live on GitHub.")
     print(f"📂 Project location: {project_path}")
