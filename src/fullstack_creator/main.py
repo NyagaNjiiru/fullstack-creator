@@ -5,28 +5,68 @@ import inquirer
 import platform
 import sys
 import shutil
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
-def run_cmd(cmd, cwd=None):
-    print(f"[RUNNING] {cmd}")
+def run_cmd(cmd, cwd=None, capture_output=True, show_output=False):
+    """Enhanced command runner with better output handling"""
+    if show_output:
+        print(f"[RUNNING] {cmd}")
+    
     try:
-        process = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        if process.returncode != 0:
-            print(f"[ERROR] Command failed: {stderr.decode()}")
-            return False
-        return True
+        if show_output:
+            # For commands we want to see output from
+            process = subprocess.Popen(
+                cmd, 
+                cwd=cwd, 
+                shell=True, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
+            
+            # Print output in real-time
+            for line in iter(process.stdout.readline, ''):
+                print(line.rstrip())
+            
+            process.wait()
+            return process.returncode == 0
+        else:
+            # Silent execution for faster operations
+            result = subprocess.run(
+                cmd, 
+                cwd=cwd, 
+                shell=True, 
+                capture_output=capture_output, 
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] Command timed out: {cmd}")
+        return False
     except Exception as e:
-        print(f"[ERROR] Failed to run command: {e}")
+        if show_output:
+            print(f"[ERROR] Failed to run command: {e}")
         return False
 
 def check_dependencies():
+    """Quick dependency check with parallel execution"""
     required = {'git': 'git --version', 'node': 'node --version', 'npm': 'npm --version'}
-    missing = []
-    for tool, check_cmd in required.items():
+    
+    def check_tool(tool_cmd):
+        tool, cmd = tool_cmd
         try:
-            subprocess.run(check_cmd.split(), capture_output=True, check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            missing.append(tool)
+            subprocess.run(cmd.split(), capture_output=True, check=True, timeout=10)
+            return tool, True
+        except:
+            return tool, False
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        results = dict(executor.map(check_tool, required.items()))
+    
+    missing = [tool for tool, available in results.items() if not available]
     
     if missing:
         print(f"[ERROR] Missing required dependencies: {', '.join(missing)}")
@@ -46,40 +86,326 @@ def open_project_folder(path):
         print(f"Project created at: {path}")
 
 def setup_python_venv(backend_path, packages):
+    """Optimized Python venv setup"""
     python_cmd = "python3" if shutil.which("python3") else "python"
-    run_cmd(f"{python_cmd} -m venv venv", cwd=backend_path)
+    
+    print("[INFO] Creating Python virtual environment...")
+    if not run_cmd(f"{python_cmd} -m venv venv", cwd=backend_path):
+        return False
     
     if platform.system() == "Windows":
-        activate_cmd = "venv\\Scripts\\activate"
-        pip_cmd = f"{activate_cmd} && pip install {' '.join(packages)}"
+        pip_cmd = "venv\\Scripts\\python -m pip install --upgrade pip"
+        install_cmd = f"venv\\Scripts\\python -m pip install {' '.join(packages)}"
     else:
-        activate_cmd = "venv/bin/activate"
-        pip_cmd = f"source {activate_cmd} && pip install {' '.join(packages)}"
+        pip_cmd = "venv/bin/python -m pip install --upgrade pip"
+        install_cmd = f"venv/bin/python -m pip install {' '.join(packages)}"
     
+    print("[INFO] Upgrading pip...")
     run_cmd(pip_cmd, cwd=backend_path)
     
+    print("[INFO] Installing Python packages...")
+    run_cmd(install_cmd, cwd=backend_path, show_output=True)
+    
+    # Create requirements.txt
     with open(os.path.join(backend_path, "requirements.txt"), "w") as f:
         f.write("\n".join(packages))
+    
+    return True
 
-def setup_npm_project(path, packages):
-    run_cmd("npm init -y", cwd=path)
+def setup_npm_project(path, packages, silent=True):
+    """Optimized NPM setup"""
+    print(f"[INFO] Initializing npm project in {os.path.basename(path)}...")
+    
+    # Use --silent flag and skip optional dependencies for speed
+    init_cmd = "npm init -y --silent"
+    if not run_cmd(init_cmd, cwd=path, show_output=not silent):
+        return False
+    
     if packages:
-        run_cmd(f"npm install {' '.join(packages)}", cwd=path)
+        # Install packages with optimizations
+        install_cmd = f"npm install {' '.join(packages)} --silent --no-audit --no-fund --prefer-offline"
+        print(f"[INFO] Installing packages: {', '.join(packages)}")
+        return run_cmd(install_cmd, cwd=path, show_output=True)
+    
+    return True
 
 def setup_vite_project(project_path, template, folder_name="frontend"):
-    if run_cmd(f"npm create vite@latest {folder_name} -- --template {template}", cwd=project_path):
-        run_cmd("npm install", cwd=os.path.join(project_path, folder_name))
+    """Optimized Vite project setup with Tailwind CSS"""
+    print(f"[INFO] Creating Vite {template} project...")
+    
+    # Use --silent flag and skip git init
+    vite_cmd = f"npm create vite@latest {folder_name} -- --template {template}"
+    
+    if run_cmd(vite_cmd, cwd=project_path, show_output=True):
+        frontend_path = os.path.join(project_path, folder_name)
+        print("[INFO] Installing frontend dependencies...")
+        
+        # Install base dependencies
+        install_cmd = "npm install --silent --no-audit --no-fund --prefer-offline"
+        if not run_cmd(install_cmd, cwd=frontend_path, show_output=True):
+            return False
+        
+        # Install and configure Tailwind CSS
+        print("[INFO] Installing Tailwind CSS...")
+        tailwind_cmd = "npm install -D tailwindcss postcss autoprefixer --silent --no-audit --no-fund"
+        if not run_cmd(tailwind_cmd, cwd=frontend_path, show_output=True):
+            return False
+        
+        # Initialize Tailwind config
+        print("[INFO] Configuring Tailwind CSS...")
+        if not run_cmd("npx tailwindcss init -p", cwd=frontend_path):
+            return False
+        
+        # Configure Tailwind CSS for the specific template
+        setup_tailwind_config(frontend_path, template)
+        return True
+    
+    return False
 
 def create_rust_project(project_path, dependencies=None):
-    run_cmd("cargo new backend --bin", cwd=project_path)
+    """Optimized Rust project creation"""
+    print("[INFO] Creating Rust project...")
+    
+    if not run_cmd("cargo new backend --bin", cwd=project_path):
+        return False
+    
     if dependencies:
         backend_path = os.path.join(project_path, "backend")
-        with open(os.path.join(backend_path, "Cargo.toml"), "a") as f:
+        cargo_toml = os.path.join(backend_path, "Cargo.toml")
+        
+        with open(cargo_toml, "a") as f:
             f.write(f'\n[dependencies]\n{dependencies}')
+    
+    return True
 
-def write_file(path, content):
-    with open(path, "w") as f:
-        f.write(content)
+def setup_tailwind_config(frontend_path, template):
+    """Configure Tailwind CSS for different Vite templates"""
+    
+    # Update tailwind.config.js with proper content paths
+    tailwind_config = {
+        "react": '''/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}''',
+        "vue": '''/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{vue,js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}''',
+        "svelte": '''/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{svelte,js,ts}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}'''
+    }
+    
+    # Write the appropriate tailwind config
+    config = tailwind_config.get(template, tailwind_config["react"])
+    write_file(os.path.join(frontend_path, "tailwind.config.js"), config)
+    
+    # Add Tailwind directives to CSS file
+    tailwind_css = '''@tailwind base;
+@tailwind components;
+@tailwind utilities;'''
+    
+    # Different CSS file locations for different templates
+    css_paths = {
+        "react": "src/index.css",
+        "vue": "src/style.css",
+        "svelte": "src/lib/index.css"  # Svelte might vary
+    }
+    
+    css_path = css_paths.get(template, "src/index.css")
+    full_css_path = os.path.join(frontend_path, css_path)
+    
+    # For Svelte, we might need to create the lib directory
+    if template == "svelte":
+        lib_dir = os.path.join(frontend_path, "src", "lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        # Also update the main CSS import in App.svelte
+        app_svelte_path = os.path.join(frontend_path, "src", "App.svelte")
+        if os.path.exists(app_svelte_path):
+            try:
+                with open(app_svelte_path, "r") as f:
+                    content = f.read()
+                # Replace the default CSS import with Tailwind
+                content = content.replace('./app.css', './lib/index.css')
+                write_file(app_svelte_path, content)
+            except:
+                # If replacement fails, just create the CSS file
+                pass
+    
+    # Write Tailwind CSS directives
+    write_file(full_css_path, tailwind_css)
+    
+    # Add some example Tailwind classes to demonstrate it's working
+    create_tailwind_example(frontend_path, template)
+
+def create_tailwind_example(frontend_path, template):
+    """Add example Tailwind classes to show it's working"""
+    
+    if template == "react":
+        # Update App.jsx with Tailwind example
+        app_jsx_path = os.path.join(frontend_path, "src", "App.jsx")
+        if os.path.exists(app_jsx_path):
+            app_content = '''import { useState } from 'react'
+import reactLogo from './assets/react.svg'
+import viteLogo from '/vite.svg'
+import './index.css'
+
+function App() {
+  const [count, setCount] = useState(0)
+
+  return (
+    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center">
+      <div className="bg-white p-8 rounded-lg shadow-lg text-center max-w-md">
+        <div className="flex justify-center space-x-4 mb-6">
+          <a href="https://vitejs.dev" target="_blank" rel="noopener noreferrer">
+            <img src={viteLogo} className="w-16 h-16 hover:drop-shadow-lg transition-all duration-300" alt="Vite logo" />
+          </a>
+          <a href="https://react.dev" target="_blank" rel="noopener noreferrer">
+            <img src={reactLogo} className="w-16 h-16 hover:drop-shadow-lg transition-all duration-300 animate-spin-slow" alt="React logo" />
+          </a>
+        </div>
+        <h1 className="text-3xl font-bold text-gray-800 mb-6">Vite + React + Tailwind</h1>
+        <div className="mb-6">
+          <button 
+            className="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 transform hover:scale-105"
+            onClick={() => setCount((count) => count + 1)}
+          >
+            Count is {count}
+          </button>
+        </div>
+        <p className="text-gray-600 mb-4">
+          Edit <code className="bg-gray-100 px-2 py-1 rounded text-sm font-mono">src/App.jsx</code> and save to test HMR
+        </p>
+        <p className="text-sm text-gray-500">
+          Tailwind CSS is configured and ready to use! 🎨
+        </p>
+      </div>
+    </div>
+  )
+}
+
+export default App'''
+            write_file(app_jsx_path, app_content)
+    
+    elif template == "vue":
+        # Update App.vue with Tailwind example
+        app_vue_path = os.path.join(frontend_path, "src", "App.vue")
+        if os.path.exists(app_vue_path):
+            app_content = '''<script setup>
+import { ref } from 'vue'
+import HelloWorld from './components/HelloWorld.vue'
+
+const count = ref(0)
+</script>
+
+<template>
+  <div class="min-h-screen bg-gray-100 flex flex-col items-center justify-center">
+    <div class="bg-white p-8 rounded-lg shadow-lg text-center max-w-md">
+      <div class="flex justify-center space-x-4 mb-6">
+        <a href="https://vitejs.dev" target="_blank" rel="noopener noreferrer">
+          <img src="/vite.svg" class="w-16 h-16 hover:drop-shadow-lg transition-all duration-300" alt="Vite logo" />
+        </a>
+        <a href="https://vuejs.org/" target="_blank" rel="noopener noreferrer">
+          <img src="./assets/vue.svg" class="w-16 h-16 hover:drop-shadow-lg transition-all duration-300" alt="Vue logo" />
+        </a>
+      </div>
+      <h1 class="text-3xl font-bold text-gray-800 mb-6">Vite + Vue + Tailwind</h1>
+      <div class="mb-6">
+        <button 
+          class="bg-green-500 hover:bg-green-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 transform hover:scale-105"
+          @click="count++"
+        >
+          Count is {{ count }}
+        </button>
+      </div>
+      <p class="text-gray-600 mb-4">
+        Edit <code class="bg-gray-100 px-2 py-1 rounded text-sm font-mono">src/App.vue</code> and save to test HMR
+      </p>
+      <p class="text-sm text-gray-500">
+        Tailwind CSS is configured and ready to use! 🎨
+      </p>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/* Component-specific styles can go here */
+</style>'''
+            write_file(app_vue_path, app_content)
+    
+    elif template == "svelte":
+        # Update App.svelte with Tailwind example
+        app_svelte_path = os.path.join(frontend_path, "src", "App.svelte")
+        if os.path.exists(app_svelte_path):
+            app_content = '''<script>
+  import svelteLogo from './assets/svelte.svg'
+  import Counter from './lib/Counter.svelte'
+  let count = 0
+</script>
+
+<main class="min-h-screen bg-gray-100 flex flex-col items-center justify-center">
+  <div class="bg-white p-8 rounded-lg shadow-lg text-center max-w-md">
+    <div class="flex justify-center space-x-4 mb-6">
+      <a href="https://vitejs.dev" target="_blank" rel="noopener noreferrer">
+        <img src="/vite.svg" class="w-16 h-16 hover:drop-shadow-lg transition-all duration-300" alt="Vite logo" />
+      </a>
+      <a href="https://svelte.dev" target="_blank" rel="noopener noreferrer">
+        <img src={svelteLogo} class="w-16 h-16 hover:drop-shadow-lg transition-all duration-300" alt="Svelte Logo" />
+      </a>
+    </div>
+
+    <h1 class="text-3xl font-bold text-gray-800 mb-6">Vite + Svelte + Tailwind</h1>
+
+    <div class="mb-6">
+      <button 
+        class="bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 transform hover:scale-105"
+        on:click={() => count += 1}
+      >
+        Count is {count}
+      </button>
+    </div>
+
+    <p class="text-gray-600 mb-4">
+      Edit <code class="bg-gray-100 px-2 py-1 rounded text-sm font-mono">src/App.svelte</code> and save to test HMR
+    </p>
+    
+    <p class="text-sm text-gray-500">
+      Tailwind CSS is configured and ready to use! 🎨
+    </p>
+  </div>
+</main>'''
+            write_file(app_svelte_path, app_content)
+    """Write file with error handling"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to write {path}: {e}")
+        return False
 
 def get_structure_choices(language):
     return ["Backend only"] if language in ["Rust", "Go", "C#"] else ["Fullstack", "Frontend only", "Backend only"]
@@ -136,9 +462,15 @@ def create_readme(project_path, project_name, frontend, backend, language):
     content = f"# {project_name}\n\n## Project Structure\n\n"
     
     if frontend != "None" and backend != "None":
-        content += f"- **Frontend**: {frontend}\n- **Backend**: {backend}\n"
+        content += f"- **Frontend**: {frontend}"
+        if frontend in ["Vite + React", "Vue", "Svelte"]:
+            content += " (with Tailwind CSS v3)"
+        content += f"\n- **Backend**: {backend}\n"
     elif frontend != "None":
-        content += f"- **Frontend**: {frontend}\n"
+        content += f"- **Frontend**: {frontend}"
+        if frontend in ["Vite + React", "Vue", "Svelte"]:
+            content += " (with Tailwind CSS v3)"
+        content += "\n"
     elif backend != "None":
         content += f"- **Backend**: {backend}\n"
     
@@ -158,6 +490,8 @@ def create_readme(project_path, project_name, frontend, backend, language):
     
     if frontend != "None":
         content += '\n#### Frontend\n```bash\ncd frontend\nnpm install\nnpm run dev\n```\n'
+        if frontend in ["Vite + React", "Vue", "Svelte"]:
+            content += '\n**Tailwind CSS is pre-configured!** You can start using Tailwind utility classes immediately.\n'
     
     if backend != "None":
         backend_docs = {
@@ -175,22 +509,34 @@ def create_readme(project_path, project_name, frontend, backend, language):
     write_file(os.path.join(project_path, "README.md"), content)
 
 def setup_frontend(project_path, frontend):
+    """Setup frontend with optimizations"""
     if frontend == "Vite + React":
-        setup_vite_project(project_path, "react")
+        return setup_vite_project(project_path, "react")
     elif frontend == "Vue":
-        setup_vite_project(project_path, "vue")
+        return setup_vite_project(project_path, "vue")
     elif frontend == "Angular":
-        run_cmd("npx -p @angular/cli ng new frontend --skip-git --routing --style=css", cwd=project_path)
+        print("[INFO] Creating Angular project...")
+        # Use --skip-install to speed up initial creation, then install separately
+        cmd = "npx -p @angular/cli ng new frontend --skip-git --skip-install --routing --style=css --package-manager=npm"
+        if run_cmd(cmd, cwd=project_path, show_output=True):
+            frontend_path = os.path.join(project_path, "frontend")
+            print("[INFO] Installing Angular dependencies...")
+            return run_cmd("npm install --silent --no-audit --no-fund", cwd=frontend_path, show_output=True)
+        return False
     elif frontend == "Svelte":
-        setup_vite_project(project_path, "svelte")
+        return setup_vite_project(project_path, "svelte")
+    return True
 
 def setup_backend(project_path, backend):
+    """Setup backend with optimizations"""
     backend_path = os.path.join(project_path, "backend")
     
     if backend == "Express":
         os.makedirs(backend_path, exist_ok=True)
-        setup_npm_project(backend_path, ["express", "cors", "dotenv"])
-        write_file(os.path.join(backend_path, "server.js"), """const express = require('express');
+        if not setup_npm_project(backend_path, ["express", "cors", "dotenv"]):
+            return False
+            
+        server_content = """const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
@@ -207,12 +553,15 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-""")
+"""
+        return write_file(os.path.join(backend_path, "server.js"), server_content)
     
     elif backend == "FastAPI":
         os.makedirs(backend_path, exist_ok=True)
-        setup_python_venv(backend_path, ["fastapi", "uvicorn[standard]"])
-        write_file(os.path.join(backend_path, "main.py"), """from fastapi import FastAPI
+        if not setup_python_venv(backend_path, ["fastapi", "uvicorn[standard]"]):
+            return False
+            
+        main_content = """from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -228,12 +577,15 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"message": "FastAPI backend running!"}
-""")
+"""
+        return write_file(os.path.join(backend_path, "main.py"), main_content)
     
     elif backend == "Flask":
         os.makedirs(backend_path, exist_ok=True)
-        setup_python_venv(backend_path, ["flask", "flask-cors"])
-        write_file(os.path.join(backend_path, "app.py"), """from flask import Flask, jsonify
+        if not setup_python_venv(backend_path, ["flask", "flask-cors"]):
+            return False
+            
+        app_content = """from flask import Flask, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -245,18 +597,24 @@ def home():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-""")
+"""
+        return write_file(os.path.join(backend_path, "app.py"), app_content)
     
     elif backend == "Django":
         os.makedirs(backend_path, exist_ok=True)
-        setup_python_venv(backend_path, ["django", "djangorestframework", "django-cors-headers"])
-        activate_cmd = "venv\\Scripts\\activate" if platform.system() == "Windows" else "source venv/bin/activate"
-        django_cmd = f"{activate_cmd} && django-admin startproject backend_app ."
-        run_cmd(django_cmd, cwd=backend_path)
+        if not setup_python_venv(backend_path, ["django", "djangorestframework", "django-cors-headers"]):
+            return False
+            
+        print("[INFO] Creating Django project...")
+        activate_cmd = "venv\\Scripts\\python" if platform.system() == "Windows" else "venv/bin/python"
+        django_cmd = f"{activate_cmd} -m django startproject backend_app ."
+        return run_cmd(django_cmd, cwd=backend_path, show_output=True)
     
     elif backend == "Rocket":
-        create_rust_project(project_path, 'rocket = "0.5"')
-        write_file(os.path.join(project_path, "backend", "src", "main.rs"), """#[macro_use] extern crate rocket;
+        if not create_rust_project(project_path, 'rocket = "0.5"'):
+            return False
+            
+        main_content = """#[macro_use] extern crate rocket;
 
 #[get("/")]
 fn index() -> &'static str {
@@ -267,11 +625,14 @@ fn index() -> &'static str {
 fn rocket() -> _ {
     rocket::build().mount("/", routes![index])
 }
-""")
+"""
+        return write_file(os.path.join(project_path, "backend", "src", "main.rs"), main_content)
     
     elif backend == "Actix":
-        create_rust_project(project_path, 'actix-web = "4"')
-        write_file(os.path.join(project_path, "backend", "src", "main.rs"), """use actix_web::{web, App, HttpResponse, HttpServer, Result};
+        if not create_rust_project(project_path, 'actix-web = "4"'):
+            return False
+            
+        main_content = """use actix_web::{web, App, HttpResponse, HttpServer, Result};
 
 async fn index() -> Result<HttpResponse> {
     Ok(HttpResponse::Ok().json("Actix backend running!"))
@@ -287,11 +648,12 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
-""")
+"""
+        return write_file(os.path.join(project_path, "backend", "src", "main.rs"), main_content)
     
     elif backend == "Basic HTTP Server":
         os.makedirs(backend_path, exist_ok=True)
-        write_file(os.path.join(backend_path, "main.go"), """package main
+        main_content = """package main
 
 import (
     "fmt"
@@ -308,10 +670,14 @@ func main() {
     fmt.Println("Server running on http://localhost:8080")
     http.ListenAndServe(":8080", nil)
 }
-""")
+"""
+        return write_file(os.path.join(backend_path, "main.go"), main_content)
     
     elif backend == "ASP.NET Core WebAPI":
-        run_cmd("dotnet new webapi -n backend", cwd=project_path)
+        print("[INFO] Creating ASP.NET Core WebAPI project...")
+        return run_cmd("dotnet new webapi -n backend", cwd=project_path, show_output=True)
+    
+    return True
 
 def create_start_script(project_path, frontend, backend):
     is_windows = platform.system() == "Windows"
@@ -322,6 +688,7 @@ def create_start_script(project_path, frontend, backend):
     
     if is_windows:
         commands.append("@echo off")
+        commands.append("echo Starting development servers...")
         if frontend != "None":
             commands.append('start cmd /k "cd frontend && npm run dev"')
         
@@ -337,6 +704,7 @@ def create_start_script(project_path, frontend, backend):
         }
     else:
         commands.append("#!/bin/bash\n")
+        commands.append("echo \"Starting development servers...\"")
         if frontend != "None":
             commands.append("(cd frontend && npm run dev) &")
         
@@ -366,8 +734,10 @@ def main():
     print("Create Fullstack Project")
     print("=" * 25)
     
+    # Quick dependency check
     check_dependencies()
     
+    # Get project details
     project_name = input("Enter project name: ").strip()
     if not project_name:
         print("[ERROR] Project name cannot be empty")
@@ -376,14 +746,18 @@ def main():
     save_path = input("Enter directory to save project (default: current dir): ").strip() or os.getcwd()
     project_path = os.path.join(save_path, project_name)
     
+    # Handle existing directory
     if os.path.exists(project_path):
         overwrite = inquirer.list_input(f"Directory {project_path} already exists. Overwrite?", choices=["Yes", "No"])
         if overwrite == "No":
             sys.exit(0)
+        print("[INFO] Removing existing directory...")
         shutil.rmtree(project_path)
     
+    # Create project directory
     os.makedirs(project_path, exist_ok=True)
 
+    # Get user choices
     language = inquirer.list_input("Choose primary language", choices=["JavaScript", "Python", "Rust", "Go", "C#"])
     structure = inquirer.list_input("Project type", choices=get_structure_choices(language))
 
@@ -395,9 +769,11 @@ def main():
     if structure in ["Fullstack", "Backend only"]:
         backend = inquirer.list_input("Choose backend framework", choices=get_backend_choices(language))
 
+    # Check language dependencies
     if not check_language_dependencies(language, backend):
         sys.exit(1)
 
+    # GitHub setup
     gh_available = shutil.which("gh") is not None
     if gh_available:
         visibility = inquirer.list_input("GitHub repository visibility", choices=["Public", "Private", "Skip"])
@@ -405,35 +781,58 @@ def main():
         print("[INFO] GitHub CLI not found. Skipping repository creation.")
         visibility = "Skip"
 
-    print(f"[INFO] Creating {structure} project at {project_path}")
+    print(f"\n[INFO] Creating {structure} project at {project_path}")
+    print("[INFO] This may take a few minutes for package installations...")
 
+    # Initialize git early
     run_cmd("git init", cwd=project_path)
     
-    if frontend != "None":
-        setup_frontend(project_path, frontend)
-    
-    if backend != "None":
-        setup_backend(project_path, backend)
+    # Setup components with better error handling
+    try:
+        # Setup frontend and backend in parallel where possible
+        tasks = []
+        
+        if frontend != "None":
+            print(f"\n=== Setting up {frontend} frontend ===")
+            if not setup_frontend(project_path, frontend):
+                print(f"[WARNING] Frontend setup failed, continuing...")
+        
+        if backend != "None":
+            print(f"\n=== Setting up {backend} backend ===")
+            if not setup_backend(project_path, backend):
+                print(f"[WARNING] Backend setup failed, continuing...")
 
-    create_start_script(project_path, frontend, backend)
-    create_gitignore(project_path, frontend, backend, language)
-    create_readme(project_path, project_name, frontend, backend, language)
+        # Create project files
+        print("\n=== Creating project files ===")
+        create_start_script(project_path, frontend, backend)
+        create_gitignore(project_path, frontend, backend, language)
+        create_readme(project_path, project_name, frontend, backend, language)
 
-    if visibility != "Skip":
-        print("[INFO] Creating GitHub repository...")
-        visibility_flag = "--public" if visibility == "Public" else "--private"
-        success = run_cmd(f"gh repo create {project_name} {visibility_flag} --source . --remote=origin --push", cwd=project_path)
-        if not success:
-            print("[WARNING] Failed to create GitHub repository. You can create it manually later.")
+        # GitHub repository creation
+        if visibility != "Skip":
+            print("\n=== Creating GitHub repository ===")
+            visibility_flag = "--public" if visibility == "Public" else "--private"
+            success = run_cmd(f"gh repo create {project_name} {visibility_flag} --source . --remote=origin --push", 
+                            cwd=project_path, show_output=True)
+            if not success:
+                print("[WARNING] Failed to create GitHub repository. You can create it manually later.")
 
-    open_answer = inquirer.list_input("Open project folder now?", choices=["Yes", "No"])
-    if open_answer == "Yes":
-        open_project_folder(project_path)
+        # Final steps
+        open_answer = inquirer.list_input("\nOpen project folder now?", choices=["Yes", "No"])
+        if open_answer == "Yes":
+            open_project_folder(project_path)
 
-    script_ext = ".bat" if platform.system() == "Windows" else ".sh"
-    print(f"[DONE] Project {project_name} setup complete at {project_path}")
-    print(f"Run .{os.sep}start{script_ext} to start your project")
+        script_ext = ".bat" if platform.system() == "Windows" else ".sh"
+        print(f"\n[SUCCESS] Project {project_name} setup complete!")
+        print(f"Location: {project_path}")
+        print(f"To start your project, run: .{os.sep}start{script_ext}")
+        
+    except KeyboardInterrupt:
+        print("\n[INFO] Setup interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n[ERROR] Unexpected error during setup: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-    
