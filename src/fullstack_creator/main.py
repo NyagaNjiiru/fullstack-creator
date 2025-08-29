@@ -80,7 +80,16 @@ def open_project_folder(path):
         elif system == "Windows":
             subprocess.run(["start", path], shell=True)
         else:
-            subprocess.run(["xdg-open", path])
+            # Try different Linux file managers
+            file_managers = ["xdg-open", "nautilus", "dolphin", "thunar", "pcmanfm"]
+            opened = False
+            for fm in file_managers:
+                if shutil.which(fm):
+                    subprocess.run([fm, path])
+                    opened = True
+                    break
+            if not opened:
+                print(f"[INFO] No file manager found. Project created at: {path}")
     except Exception as e:
         print(f"[ERROR] Could not open folder: {e}")
         print(f"Project created at: {path}")
@@ -117,13 +126,13 @@ def setup_npm_project(path, packages, silent=True):
     print(f"[INFO] Initializing npm project in {os.path.basename(path)}...")
     
     # Use --silent flag and skip optional dependencies for speed
-    init_cmd = "npm init -y --silent"
+    init_cmd = "npm init -y"
     if not run_cmd(init_cmd, cwd=path, show_output=not silent):
         return False
     
     if packages:
-        # Install packages with optimizations
-        install_cmd = f"npm install {' '.join(packages)} --silent --no-audit --no-fund --prefer-offline"
+        # Install packages with optimizations, but show output for debugging
+        install_cmd = f"npm install {' '.join(packages)} --no-audit --no-fund"
         print(f"[INFO] Installing packages: {', '.join(packages)}")
         return run_cmd(install_cmd, cwd=path, show_output=True)
     
@@ -138,23 +147,49 @@ def setup_vite_project(project_path, template, folder_name="frontend"):
     
     if run_cmd(vite_cmd, cwd=project_path, show_output=True):
         frontend_path = os.path.join(project_path, folder_name)
+        
+        # Ensure package.json exists before proceeding
+        if not os.path.exists(os.path.join(frontend_path, "package.json")):
+            print("[ERROR] Vite project creation failed - no package.json found")
+            return False
+            
         print("[INFO] Installing frontend dependencies...")
         
-        # Install base dependencies
-        install_cmd = "npm install --silent --no-audit --no-fund --prefer-offline"
+        # Install base dependencies (remove --silent to see any errors)
+        install_cmd = "npm install --no-audit --no-fund --prefer-offline"
         if not run_cmd(install_cmd, cwd=frontend_path, show_output=True):
-            return False
+            print("[ERROR] Failed to install base dependencies")
+            # Try without --prefer-offline as fallback
+            print("[INFO] Retrying without --prefer-offline...")
+            fallback_cmd = "npm install --no-audit --no-fund"
+            if not run_cmd(fallback_cmd, cwd=frontend_path, show_output=True):
+                print("[ERROR] Frontend dependency installation failed")
+                return False
         
         # Install and configure Tailwind CSS
         print("[INFO] Installing Tailwind CSS...")
-        tailwind_cmd = "npm install -D tailwindcss postcss autoprefixer --silent --no-audit --no-fund"
+        tailwind_cmd = "npm install -D tailwindcss postcss autoprefixer --no-audit --no-fund"
         if not run_cmd(tailwind_cmd, cwd=frontend_path, show_output=True):
-            return False
+            print("[WARNING] Failed to install Tailwind CSS")
+            return True  # Continue without Tailwind
         
         # Initialize Tailwind config
         print("[INFO] Configuring Tailwind CSS...")
-        if not run_cmd("npx tailwindcss init -p", cwd=frontend_path):
-            return False
+        if not run_cmd("npx tailwindcss init -p", cwd=frontend_path, show_output=False):
+            print("[WARNING] Failed to initialize Tailwind config, creating manually...")
+            # Create config files manually as fallback
+            write_file(os.path.join(frontend_path, "tailwind.config.js"), '''/** @type {import('tailwindcss').Config} */
+export default {
+  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  theme: { extend: {} },
+  plugins: [],
+}''')
+            write_file(os.path.join(frontend_path, "postcss.config.js"), '''export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}''')
         
         # Configure Tailwind CSS for the specific template
         setup_tailwind_config(frontend_path, template)
@@ -397,6 +432,17 @@ const count = ref(0)
   </div>
 </main>'''
             write_file(app_svelte_path, app_content)
+
+def write_file(path, content):
+    """Write file with error handling"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to write {path}: {e}")
+        return False
     """Write file with error handling"""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -784,7 +830,8 @@ def main():
     print(f"\n[INFO] Creating {structure} project at {project_path}")
     print("[INFO] This may take a few minutes for package installations...")
 
-    # Initialize git early
+    # Initialize git early and make initial commit
+    print("[INFO] Initializing git repository...")
     run_cmd("git init", cwd=project_path)
     
     # Setup components with better error handling
@@ -807,6 +854,11 @@ def main():
         create_start_script(project_path, frontend, backend)
         create_gitignore(project_path, frontend, backend, language)
         create_readme(project_path, project_name, frontend, backend, language)
+
+        # Make initial git commit
+        print("[INFO] Making initial commit...")
+        run_cmd("git add .", cwd=project_path)
+        run_cmd('git commit -m "Initial commit: Project scaffolding"', cwd=project_path)
 
         # GitHub repository creation
         if visibility != "Skip":
